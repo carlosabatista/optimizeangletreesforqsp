@@ -24,19 +24,24 @@ Uso:
     qc, bt = build_pnm_adaptive(state_vector, cached_result=result)
 """
 
+import time
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pnm"))
+
 import numpy as np
 from qiskit import QuantumCircuit
-from quantum_state_vector_utils import clStateVector, normalize_state, vector_to_binary_dict
-from PNM_main_v3 import (
+from quantum_state_vector_utils import normalize_state, vector_to_binary_dict, is_valid_state_vector
+from angle_tree_core import get_state_tree
+from pnm_main import (
     initializeUCGE, initializeUCGEDC, initializeLR, initializeBAA,
     initializeSVD, initializePivot,
     _fix_subgroup_phase, _fix_global_phase,
-    _extract_substate_from_global, _compute_substates,
-    get_state_tree,
+    _compute_substates,
 )
 from pnm_cluster_analysis import analyze_ry_rz_clusters
 from qclib.state_preparation import MergeInitialize
-import time
 
 
 # ===========================================================================
@@ -114,7 +119,7 @@ def build_pnm_adaptive(state_vector, cached_result=None):
 
     Parâmetros
     ----------
-    state_vector   : vetor de estado tipo array ou clStateVector
+    state_vector   : vetor de estado (array numpy complexo)
     cached_result  : resultado de analyze_ry_rz_clusters (opcional).
                      Se None, é calculado internamente.
                      Pode conter 'substates_cache' pré-computado via
@@ -125,27 +130,31 @@ def build_pnm_adaptive(state_vector, cached_result=None):
     QC             : QuantumCircuit  ou None se não separável
     bt             : float  tempo de construção em segundos (build time)
     methods_used   : dict   {group_id: método escolhido}
+
+    Levanta ValueError se state_vector não for um vetor de estado válido.
     """
     start = time.time()
 
-    if not isinstance(state_vector, clStateVector):
-        state_vector = clStateVector(state_vector)
+    if not is_valid_state_vector(state_vector):
+        raise ValueError(
+            f"vetor de estado inválido (tamanho={len(state_vector)}): "
+            f"esperado potência de 2 e norma não-nula")
 
-    state      = state_vector.vector
-    iNumQubits = state_vector.num_qubits
+    state      = normalize_state(np.asarray(state_vector, dtype=complex))
+    iNumQubits = len(state).bit_length() - 1
 
     # análise de separabilidade
     if cached_result is not None:
         result = cached_result
     else:
-        result = analyze_ry_rz_clusters(state_vector)
+        result = analyze_ry_rz_clusters(state)
 
     if not result['can_decompose']:
         return None, time.time() - start, {}
 
     # pré-computa sub-estados se ainda não feito
     if 'substates_cache' not in result:
-        result = _compute_substates(state_vector, result)
+        result = _compute_substates(state, result)
 
     state_tree   = get_state_tree(state, iNumQubits)
     global_phase = state_tree.arg
@@ -216,7 +225,6 @@ def build_pnm_adaptive(state_vector, cached_result=None):
 
 def build_pnm_adaptive_compat(state_vector, cached_result=None):
     """
-    Wrapper com mesma assinatura de build_pnm_v3_with_method:
     retorna (QC, build_time).
     """
     qc, bt, _ = build_pnm_adaptive(state_vector, cached_result=cached_result)
@@ -231,21 +239,27 @@ def explain_selection(state_vector, cached_result=None):
     """
     Imprime qual método seria escolhido para cada sub-estado e por quê.
     Útil para depuração e análise.
+
+    Levanta ValueError se state_vector não for um vetor de estado válido.
     """
-    if not isinstance(state_vector, clStateVector):
-        state_vector = clStateVector(state_vector)
+    if not is_valid_state_vector(state_vector):
+        raise ValueError(
+            f"vetor de estado inválido (tamanho={len(state_vector)}): "
+            f"esperado potência de 2 e norma não-nula")
+
+    state = normalize_state(np.asarray(state_vector, dtype=complex))
 
     if cached_result is None:
-        cached_result = analyze_ry_rz_clusters(state_vector)
+        cached_result = analyze_ry_rz_clusters(state)
 
     if not cached_result['can_decompose']:
         print("Estado não separável — nenhuma decomposição.")
         return
 
     if 'substates_cache' not in cached_result:
-        cached_result = _compute_substates(state_vector, cached_result)
+        cached_result = _compute_substates(state, cached_result)
 
-    iNumQubits = state_vector.num_qubits
+    iNumQubits = len(state).bit_length() - 1
     print(f"Estado: {iNumQubits}q | grupos: {cached_result['num_groups']}")
     print(f"{'Grupo':<6} {'nq':>4} {'nz':>6} {'rho':>7}  Método")
     print(f"{'─'*6} {'─'*4} {'─'*6} {'─'*7}  {'─'*14}")
